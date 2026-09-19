@@ -1749,6 +1749,72 @@ footer {
     margin-bottom: 10px;
 }
 
+.nav-dropdown {
+    position: relative;
+    display: inline-block;
+    margin-left: 15px;
+}
+
+.nav-dropdown summary {
+    list-style: none;
+    cursor: pointer;
+    color: #33394a;
+    font-weight: 700;
+}
+
+.nav-dropdown summary::-webkit-details-marker {
+    display: none;
+}
+
+.nav-dropdown summary::after {
+    content: " ▾";
+    font-size: 11px;
+}
+
+.nav-menu {
+    position: absolute;
+    top: 30px;
+    right: 0;
+    min-width: 210px;
+    background: white;
+    border: 1px solid #e1e5ee;
+    border-radius: 10px;
+    box-shadow: 0 10px 30px rgba(24,32,51,.14);
+    padding: 7px;
+    z-index: 1000;
+}
+
+.nav-menu a {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 11px;
+    border-radius: 8px;
+    white-space: nowrap;
+    text-decoration: none;
+}
+
+.nav-menu a:hover {
+    background: #f5f7fb;
+}
+
+.application-badge {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 22px;
+    height: 22px;
+    padding: 0 5px;
+    border-radius: 50%;
+    background: #697386;
+    color: white;
+    font-size: 11px;
+    font-weight: 900;
+    margin-left: 10px;
+}
+
+.application-badge.wide { border-radius: 11px; }
+
 @media(max-width: 700px) {
 
     nav {
@@ -1785,13 +1851,35 @@ TeenJobs
 Home
 </a>
 
-<a href="/teen-login">
-Teen
-</a>
+<details class="nav-dropdown">
+<summary>Teen</summary>
+<div class="nav-menu">
+<a href="/teen-login">Log In</a>
+<a href="/teen-active-applications">Active Applications</a>
+<a href="/teen-application-results">Application Results</a>
+</div>
+</details>
 
-<a href="/business-login">
-Business
-</a>
+<details class="nav-dropdown">
+<summary>Business</summary>
+<div class="nav-menu">
+<a href="/business-login">Log In</a>
+<a href="/post-job">Create New Job Listing</a>
+<a href="/business-applications">\span>Open Applications <span id="business-application-badge" class="application-badge">0</span></a>
+</div>
+</details>
+
+<script>
+fetch('/business-application-count')
+  .then(function(r){ return r.text(); })
+  .then(function(n){
+    var badge=document.getElementById('business-application-badge');
+    if(!badge) return;
+    var count=parseInt(n,10)||0;
+    badge.textContent=count>=9?'9+':String(count);
+  })
+  .catch(function(){});
+</script>
 
 
 </div>
@@ -2636,6 +2724,50 @@ Log in
 }
 
 
+std::string adminCreateBusinessPage(
+    const std::string& error = ""
+)
+{
+    std::ostringstream html;
+
+    html << R"HTML(
+<div class="container">
+<div class="card">
+<h1>Create Business Account</h1>
+<p class="small">Administrators can create a business account without logging out.</p>
+)HTML";
+
+    if (!error.empty())
+    {
+        html << "<div class='danger'>" << htmlEscape(error) << "</div>";
+    }
+
+    html << R"HTML(
+<form method="POST" action="/admin-create-business">
+<div class="form-group">
+<label>Business / Contact Name</label>
+<input name="name" required>
+</div>
+<div class="form-group">
+<label>Email</label>
+<input name="email" type="email" required>
+</div>
+<div class="form-group">
+<label>Password</label>
+<input name="password" type="password" required>
+</div>
+<button>Create Business Account</button>
+</form>
+<br>
+<a class="button gray" href="/admin">Back to Admin Dashboard</a>
+</div>
+</div>
+)HTML";
+
+    return page("Create Business Account", html.str());
+}
+
+
 std::string businessLoginPage(
     const std::string& error = ""
 )
@@ -3104,6 +3236,89 @@ You haven't applied to any jobs yet.
         "Teen Dashboard",
         html.str()
     );
+}
+
+
+// ============================================================
+// TEEN APPLICATION PAGES
+// ============================================================
+
+std::string teenApplicationsPage(
+    const HttpRequest& request,
+    bool results
+)
+{
+    User* user = currentUser(request);
+    std::ostringstream html;
+
+    html << R"HTML(
+<div class="container">
+<div class="card">
+<h1>)HTML"
+         << (results ? "Application Results" : "Active Applications")
+         << R"HTML(</h1>
+<p>)HTML"
+         << (results
+             ? "Applications that have received a final result."
+             : "Applications that are still being reviewed or processed.")
+         << R"HTML(</p>
+</div>
+)HTML";
+
+    bool found = false;
+    for (const Application& application : applications)
+    {
+        if (application.teenId != user->id || application.removed)
+            continue;
+
+        Job* job = findJob(application.jobId);
+        if (!job || job->removed)
+            continue;
+
+        bool isResult =
+            application.status == "Accepted" ||
+            application.status == "Rejected";
+
+        if (isResult != results)
+            continue;
+
+        found = true;
+        html << R"HTML(
+<div class="card">
+<h2>)HTML"
+             << htmlEscape(job->title)
+             << R"HTML(</h2>
+<p>)HTML"
+             << htmlEscape(job->company)
+             << R"HTML(</p>
+<p><strong>Status:</strong> )HTML"
+             << htmlEscape(application.status)
+             << R"HTML(</p>
+</div>
+)HTML";
+    }
+
+    if (!found)
+    {
+        html << R"HTML(
+<div class="card">
+)HTML"
+             << (results
+                 ? "You don't have any application results yet."
+                 : "You don't have any active applications.")
+             << R"HTML(
+</div>
+)HTML";
+    }
+
+    html << R"HTML(
+<br>
+<a class="button" href="/">Find Jobs</a>
+<a class="button gray" href="/logout">Log Out</a>
+</div>
+)HTML";
+
+    return page(results ? "Application Results" : "Active Applications", html.str());
 }
 
 
@@ -3913,6 +4128,20 @@ Admin Panel
 <p>
 You are signed in with administrator access.
 </p>
+
+<a
+    class="button"
+    href="/post-job"
+>
+Create New Job Listing
+</a>
+
+<a
+    class="button"
+    href="/admin-create-business"
+>
+Create Business Account
+</a>
 
 <a
     class="button gray"
@@ -4898,6 +5127,106 @@ void handleRequest(
 
 
     // --------------------------------------------------------
+    // ADMIN CREATE BUSINESS ACCOUNT
+    // --------------------------------------------------------
+
+    if (
+        request.method == "GET" &&
+        request.path == "/admin-create-business"
+    )
+    {
+        if (!requireAdmin(client, request))
+        {
+            return;
+        }
+
+        sendHTML(
+            client,
+            adminCreateBusinessPage()
+        );
+
+        return;
+    }
+
+
+    if (
+        request.method == "POST" &&
+        request.path == "/admin-create-business"
+    )
+    {
+        if (!requireAdmin(client, request))
+        {
+            return;
+        }
+
+        auto nameIt = request.form.find("name");
+        auto emailIt = request.form.find("email");
+        auto passwordIt = request.form.find("password");
+
+        if (
+            nameIt == request.form.end() ||
+            emailIt == request.form.end() ||
+            passwordIt == request.form.end()
+        )
+        {
+            sendHTML(
+                client,
+                adminCreateBusinessPage("All fields are required.")
+            );
+            return;
+        }
+
+        std::string name = nameIt->second;
+        std::string email = toLower(emailIt->second);
+        std::string password = passwordIt->second;
+
+        if (name.empty() || email.empty() || password.empty())
+        {
+            sendHTML(
+                client,
+                adminCreateBusinessPage("All fields are required.")
+            );
+            return;
+        }
+
+        if (isConfiguredAdminEmail(email))
+        {
+            sendHTML(
+                client,
+                adminCreateBusinessPage("That email is reserved for site administration.")
+            );
+            return;
+        }
+
+        for (const User& existing : users)
+        {
+            if (!existing.removed && existing.email == email)
+            {
+                sendHTML(
+                    client,
+                    adminCreateBusinessPage("That email is already registered.")
+                );
+                return;
+            }
+        }
+
+        User business;
+        business.id = nextUserId();
+        business.name = name;
+        business.email = email;
+        business.password = password;
+        business.age = 0;
+        business.role = UserRole::BUSINESS;
+
+        users.push_back(business);
+        saveUsers();
+
+        redirect(client, "/admin");
+        return;
+    }
+
+
+    // --------------------------------------------------------
     // BUSINESS LOGIN
     //
     // ADMIN ALSO LOGS IN HERE.
@@ -5095,6 +5424,28 @@ void handleRequest(
 
 
     // --------------------------------------------------------
+    // TEEN APPLICATION PAGES
+    // --------------------------------------------------------
+
+    if (request.method == "GET" &&
+        (request.path == "/teen-active-applications" ||
+         request.path == "/teen-application-results"))
+    {
+        if (!requireTeen(client, request))
+            return;
+
+        sendHTML(
+            client,
+            teenApplicationsPage(
+                request,
+                request.path == "/teen-application-results"
+            )
+        );
+        return;
+    }
+
+
+    // --------------------------------------------------------
     // BUSINESS DASHBOARD
     // --------------------------------------------------------
 
@@ -5134,6 +5485,34 @@ void handleRequest(
             businessDashboard(request)
         );
 
+        return;
+    }
+
+
+    // --------------------------------------------------------
+    // BUSINESS APPLICATION COUNT
+    // --------------------------------------------------------
+
+    if (request.method == "GET" && request.path == "/business-application-count")
+    {
+        User* user = currentUser(request);
+        if (!user || (user->role != UserRole::BUSINESS && user->role != UserRole::ADMIN))
+        {
+            sendHTML(client, "0");
+            return;
+        }
+
+        int count = 0;
+        for (const Application& application : applications)
+        {
+            if (application.removed) continue;
+            Job* job = findJob(application.jobId);
+            if (!job || job->removed) continue;
+            if (user->role == UserRole::ADMIN || job->businessId == user->id)
+                count++;
+        }
+
+        sendHTML(client, std::to_string(count));
         return;
     }
 

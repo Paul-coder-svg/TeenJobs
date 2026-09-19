@@ -1,9 +1,0 @@
-services:
-  - type: web
-    name: teenjobs
-    runtime: native
-    buildCommand: g++ -std=c++17 -O2 main.cpp -o TeenJobs
-    startCommand: ./TeenJobs
-    envVars:
-      - key: PORT
-        value: "10000"

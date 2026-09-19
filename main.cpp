@@ -24,7 +24,7 @@
 // No SQLite
 // No CMake
 //
-// Windows + Winsock
+// Linux/POSIX sockets for Render and other Linux hosts
 // ============================================================
 
 
@@ -46,17 +46,8 @@ struct AdminCredential
     std::string email;
     std::string password;
     std::string name;
-    std::string phone;
 };
 
-struct PendingAdminCode
-{
-    std::string email;
-    std::string code;
-    std::time_t expires = 0;
-};
-
-std::vector<PendingAdminCode> pendingAdminCodes;
 std::vector<AdminCredential> configuredAdmins;
 
 std::string envValue(const std::string& key)
@@ -106,57 +97,6 @@ std::string shellQuote(const std::string& value)
 #endif
 }
 
-std::string randomVerificationCode()
-{
-    static std::mt19937 rng(std::random_device{}());
-    std::uniform_int_distribution<int> dist(100000, 999999);
-    return std::to_string(dist(rng));
-}
-
-bool sendAdminEmailCode(const AdminCredential& admin, const std::string& code)
-{
-    std::string apiKey = envValue("TEENJOBS_RESEND_API_KEY");
-    std::string from = envValue("TEENJOBS_RESEND_FROM");
-    if (apiKey.empty() || from.empty()) return false;
-
-    std::string body =
-        "{\"from\":\"" + jsonEscape(from) +
-        "\",\"to\":[\"" + jsonEscape(admin.email) +
-        "\"],\"subject\":\"TeenJobs admin verification code\",\"text\":\"Your TeenJobs verification code is " +
-        code + ". It expires in 10 minutes.\"}";
-
-    std::string command =
-        "curl -sS -f -X POST https://api.resend.com/emails "
-        "-H " + shellQuote("Authorization: Bearer " + apiKey) + " "
-        "-H " + shellQuote("Content-Type: application/json") + " "
-        "--data " + shellQuote(body);
-
-    return std::system(command.c_str()) == 0;
-}
-
-bool sendAdminSmsCode(const AdminCredential& admin, const std::string& code)
-{
-    std::string sid = envValue("TEENJOBS_TWILIO_ACCOUNT_SID");
-    std::string token = envValue("TEENJOBS_TWILIO_AUTH_TOKEN");
-    std::string from = envValue("TEENJOBS_TWILIO_FROM_NUMBER");
-    if (sid.empty() || token.empty() || from.empty() || admin.phone.empty()) return false;
-
-    std::string data =
-        "To=" + admin.phone +
-        "&From=" + from +
-        "&Body=TeenJobs%20verification%20code%3A%20" + code +
-        "%20%28expires%20in%2010%20minutes%29";
-
-    std::string command =
-        "curl -sS -f -X POST https://api.twilio.com/2010-04-01/Accounts/" +
-        shellQuote(sid) + "/Messages.json "
-        "-u " + shellQuote(sid + ":" + token) + " "
-        "--data " + shellQuote(data);
-
-    return std::system(command.c_str()) == 0;
-}
-
-
 std::string trim(const std::string& value)
 {
     size_t first = value.find_first_not_of(" \t\r\n");
@@ -198,7 +138,7 @@ void loadAdminCredentials()
 {
     configuredAdmins.clear();
 
-    // Preferred .env format: TEENJOBS_ADMIN_1_EMAIL / PASSWORD / NAME / PHONE.
+    // Preferred .env format: TEENJOBS_ADMIN_1_EMAIL / PASSWORD / NAME.
     // Supports up to 50 admin accounts.
     for (int i = 1; i <= 50; ++i)
     {
@@ -206,14 +146,13 @@ void loadAdminCredentials()
         std::string email = envValue(prefix + "_EMAIL");
         std::string password = envValue(prefix + "_PASSWORD");
         std::string name = envValue(prefix + "_NAME");
-        std::string phone = envValue(prefix + "_PHONE");
 
-        if (email.empty() && password.empty() && name.empty() && phone.empty()) continue;
+        if (email.empty() && password.empty() && name.empty()) continue;
 
         if (!email.empty() && !password.empty())
         {
             if (name.empty()) name = "Site Administrator";
-            configuredAdmins.push_back({toLower(email), password, name, phone});
+            configuredAdmins.push_back({toLower(email), password, name});
         }
     }
 
@@ -232,7 +171,7 @@ void loadAdminCredentials()
                 std::string email = trim(entry.substr(0, colon));
                 std::string password = entry.substr(colon + 1);
                 if (!email.empty() && !password.empty())
-                    configuredAdmins.push_back({toLower(email), password, "Site Administrator", ""});
+                    configuredAdmins.push_back({toLower(email), password, "Site Administrator"});
             }
         }
     }
@@ -242,7 +181,7 @@ void loadAdminCredentials()
         const char* email = std::getenv("TEENJOBS_ADMIN_EMAIL");
         const char* password = std::getenv("TEENJOBS_ADMIN_PASSWORD");
         if (email && password && *email && *password)
-            configuredAdmins.push_back({toLower(email), password, "Site Administrator", ""});
+            configuredAdmins.push_back({toLower(email), password, "Site Administrator"});
     }
 }
 
@@ -2696,20 +2635,6 @@ Site administrators also sign in here.
 
 <div class="form-group">
 
-<label>Verification method (admin accounts)</label>
-
-<label style="display:block;margin:8px 0">
-<input type="radio" name="method" value="email" checked style="width:auto"> Email
-</label>
-
-<label style="display:block;margin:8px 0">
-<input type="radio" name="method" value="sms" style="width:auto"> SMS (if configured)
-</label>
-
-</div>
-
-<div class="form-group">
-
 <label>Password</label>
 
 <input
@@ -4562,10 +4487,6 @@ Try another age, location, or keyword.
 // HTTP HANDLERS
 // ============================================================
 
-bool issueAdminVerificationCode(const AdminCredential& admin, const std::string& method);
-bool verifyAdminVerificationCode(const std::string& email, const std::string& code);
-std::string adminVerificationPage(const std::string& email, const std::string& message = "");
-
 void handleRequest(
     int client,
     const HttpRequest& request
@@ -4978,89 +4899,42 @@ void handleRequest(
             passwordIt->second;
 
 
-        // First check owner/admin credentials. Admins require a second factor.
+        // First check owner/admin credentials.
+        // Admins sign in directly with the configured email and password.
         const AdminCredential* configuredAdmin = findConfiguredAdmin(email);
 
         if (configuredAdmin && configuredAdmin->password == password)
         {
-            std::string method = "email";
-            auto methodIt = request.form.find("method");
-            if (methodIt != request.form.end() && methodIt->second == "sms")
-                method = "sms";
-
-            if (method == "sms" && configuredAdmin->phone.empty())
+            User* admin = nullptr;
+            for (User& user : users)
             {
-                sendHTML(client, businessLoginPage("SMS is not configured for this admin. Add TEENJOBS_ADMIN_N_PHONE to .env, or use email verification."));
-                return;
+                if (!user.removed &&
+                    user.role == UserRole::ADMIN &&
+                    user.email == email)
+                {
+                    admin = &user;
+                    break;
+                }
             }
 
-            if (!issueAdminVerificationCode(*configuredAdmin, method))
+            if (!admin)
             {
-                sendHTML(client, businessLoginPage("We could not send the verification code. Check your Resend/Twilio settings."));
-                return;
+                User newAdmin;
+                newAdmin.id = nextUserId();
+                newAdmin.name = configuredAdmin->name;
+                newAdmin.email = configuredAdmin->email;
+                newAdmin.password = configuredAdmin->password;
+                newAdmin.age = 0;
+                newAdmin.role = UserRole::ADMIN;
+                users.push_back(newAdmin);
+                saveUsers();
+                admin = &users.back();
             }
 
-            sendHTML(client, adminVerificationPage(email));
+            std::string token = createSession(admin->id, UserRole::ADMIN);
+            redirect(client, "/admin", "session=" + token + "; Path=/; HttpOnly");
             return;
         }
-
-
-    if (
-        request.method == "POST" &&
-        request.path == "/admin-verify"
-    )
-    {
-        auto emailIt = request.form.find("email");
-        auto codeIt = request.form.find("code");
-
-        if (emailIt == request.form.end() || codeIt == request.form.end())
-        {
-            send400(client, "Verification request was missing required fields.");
-            return;
-        }
-
-        std::string email = toLower(emailIt->second);
-        if (!verifyAdminVerificationCode(email, codeIt->second))
-        {
-            sendHTML(client, adminVerificationPage(email, "Invalid or expired verification code."));
-            return;
-        }
-
-        User* admin = nullptr;
-        for (User& user : users)
-        {
-            if (!user.removed && user.role == UserRole::ADMIN && user.email == email)
-            {
-                admin = &user;
-                break;
-            }
-        }
-
-        const AdminCredential* configuredAdmin = findConfiguredAdmin(email);
-        if (!configuredAdmin)
-        {
-            send400(client, "Admin account is not configured.");
-            return;
-        }
-
-        if (!admin)
-        {
-            User newAdmin;
-            newAdmin.id = nextUserId();
-            newAdmin.name = configuredAdmin->name;
-            newAdmin.email = configuredAdmin->email;
-            newAdmin.password = configuredAdmin->password;
-            newAdmin.age = 0;
-            newAdmin.role = UserRole::ADMIN;
-            users.push_back(newAdmin);
-            saveUsers();
-            admin = &users.back();
-        }
-
-        std::string token = createSession(admin->id, UserRole::ADMIN);
-        redirect(client, "/admin", "session=" + token + "; Path=/; HttpOnly");
-        return;
-    }
 
 
         // Otherwise, find a normal business.
@@ -6442,66 +6316,6 @@ std::string receiveRequest(
 // ============================================================
 // CLIENT
 // ============================================================
-
-bool issueAdminVerificationCode(const AdminCredential& admin, const std::string& method)
-{
-    std::string code = randomVerificationCode();
-    bool sent = false;
-
-    if (method == "sms")
-        sent = sendAdminSmsCode(admin, code);
-    else
-        sent = sendAdminEmailCode(admin, code);
-
-    if (!sent) return false;
-
-    PendingAdminCode pending;
-    pending.email = admin.email;
-    pending.code = code;
-    pending.expires = std::time(nullptr) + 10 * 60;
-
-    for (auto& item : pendingAdminCodes)
-    {
-        if (item.email == admin.email)
-        {
-            item = pending;
-            return true;
-        }
-    }
-
-    pendingAdminCodes.push_back(pending);
-    return true;
-}
-
-bool verifyAdminVerificationCode(const std::string& email, const std::string& code)
-{
-    const std::string normalized = toLower(email);
-    const std::time_t now = std::time(nullptr);
-
-    for (auto it = pendingAdminCodes.begin(); it != pendingAdminCodes.end(); ++it)
-    {
-        if (it->email != normalized) continue;
-        if (now > it->expires)
-        {
-            pendingAdminCodes.erase(it);
-            return false;
-        }
-        if (it->code != code) return false;
-        pendingAdminCodes.erase(it);
-        return true;
-    }
-    return false;
-}
-
-std::string adminVerificationPage(const std::string& email, const std::string& message)
-{
-    std::ostringstream html;
-    html << R"HTML(<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>TeenJobs Verification</title><style>body{font-family:Arial,sans-serif;background:#f4f6fb;margin:0}.box{max-width:480px;margin:80px auto;background:#fff;padding:30px;border-radius:16px;box-shadow:0 4px 20px #0001}input,button{width:100%;padding:13px;margin:8px 0;box-sizing:border-box}button{background:#5559e8;color:#fff;border:0;border-radius:9px;font-weight:700}.err{background:#fde9ec;padding:12px;border-radius:9px}</style></head><body><div class="box"><h1>Verify your admin login</h1><p>Enter the 6-digit code we sent you.</p>)HTML";
-    if (!message.empty()) html << "<div class=\"err\">" << htmlEscape(message) << "</div>";
-    html << R"HTML(<form method="POST" action="/admin-verify"><input type="hidden" name="email" value=")HTML"
-         << htmlEscape(email) << R"HTML("><label>Verification code</label><input name="code" inputmode="numeric" maxlength="6" pattern="[0-9]{6}" required><button type="submit">Verify Code</button></form></div></body></html>)HTML";
-    return html.str();
-}
 
 void handleClient(
     int client

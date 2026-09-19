@@ -1726,9 +1726,9 @@ footer {
 
 <nav>
 
-<div class="logo">
+<a class="logo" href="/">
 TeenJobs
-</div>
+</a>
 
 <div>
 
@@ -1744,9 +1744,6 @@ Teen
 Business
 </a>
 
-<a href="/admin-login">
-Admin
-</a>
 
 </div>
 
@@ -3082,7 +3079,11 @@ std::string businessDashboard(
 <div class="card">
 
 <h1>
-Business Dashboard
+)HTML"
+        << (user && user->role == UserRole::ADMIN
+                ? "Admin Listing Dashboard"
+                : "Business Dashboard")
+        << R"HTML(
 </h1>
 
 <p>
@@ -3867,6 +3868,13 @@ Admin Panel
 <p>
 You are signed in with administrator access.
 </p>
+
+<a
+    class="button"
+    href="/post-job"
+>
+Create a Job Listing
+</a>
 
 <a
     class="button gray"
@@ -4859,12 +4867,7 @@ void handleRequest(
 
     if (
         request.method == "GET" &&
-        (
-            request.path ==
-                "/business-login" ||
-            request.path ==
-                "/admin-login"
-        )
+        request.path == "/business-login"
     )
     {
         sendHTML(
@@ -5352,7 +5355,9 @@ void handleRequest(
 
         redirect(
             client,
-            "/business-dashboard"
+            user->role == UserRole::ADMIN
+                ? "/admin"
+                : "/business-dashboard"
         );
 
         return;

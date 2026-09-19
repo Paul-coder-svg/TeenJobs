@@ -107,7 +107,15 @@ std::string trim(const std::string& value)
 
 void loadDotEnv()
 {
-    std::ifstream file(".env");
+    // Render Docker Secret Files are mounted under /etc/secrets.
+    // Local development uses .env in the current working directory.
+    std::ifstream file("/etc/secrets/.env");
+
+    if (!file)
+    {
+        file.open(".env");
+    }
+
     if (!file) return;
 
     std::string line;

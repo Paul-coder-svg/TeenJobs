@@ -2,7 +2,6 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <postgresql/libpq-fe.h>
 
 #include <algorithm>
 #include <cctype>
@@ -108,8 +107,15 @@ std::string trim(const std::string& value)
 
 void loadDotEnv()
 {
+    // Render Docker Secret Files are mounted under /etc/secrets.
+    // Local development uses .env in the current working directory.
     std::ifstream file("/etc/secrets/.env");
-    if (!file) file.open(".env");
+
+    if (!file)
+    {
+        file.open(".env");
+    }
+
     if (!file) return;
 
     std::string line;
@@ -595,375 +601,329 @@ Application* findApplication(int id)
 
 
 // ============================================================
-// POSTGRESQL STORAGE
+// SIMPLE FILE STORAGE
 // ============================================================
-// Render provides DATABASE_URL when this service is connected to
-// a Render PostgreSQL database. PostgreSQL is the persistent source
-// of truth; the vectors below remain the in-memory working state.
-// ============================================================
-
-PGconn* database = nullptr;
-
-bool dbExec(const std::string& sql)
-{
-    if (!database) return false;
-    PGresult* result = PQexec(database, sql.c_str());
-    bool ok = PQresultStatus(result) == PGRES_COMMAND_OK ||
-              PQresultStatus(result) == PGRES_TUPLES_OK;
-    if (!ok)
-    {
-        std::cerr << "PostgreSQL error: " << PQerrorMessage(database);
-    }
-    PQclear(result);
-    return ok;
-}
-
-bool dbExecParams(const std::string& sql, const std::vector<std::string>& values)
-{
-    if (!database) return false;
-
-    std::vector<const char*> params;
-    params.reserve(values.size());
-    for (const std::string& value : values)
-        params.push_back(value.c_str());
-
-    PGresult* result = PQexecParams(
-        database,
-        sql.c_str(),
-        static_cast<int>(params.size()),
-        nullptr,
-        params.data(),
-        nullptr,
-        nullptr,
-        0
-    );
-
-    bool ok = PQresultStatus(result) == PGRES_COMMAND_OK;
-    if (!ok)
-    {
-        std::cerr << "PostgreSQL error: " << PQerrorMessage(database);
-    }
-    PQclear(result);
-    return ok;
-}
-
-std::string dbValue(PGresult* result, int row, int column)
-{
-    if (PQgetisnull(result, row, column)) return "";
-    return PQgetvalue(result, row, column);
-}
-
-bool initDatabase()
-{
-    const char* url = std::getenv("DATABASE_URL");
-    if (!url || !*url)
-    {
-        std::cerr << "ERROR: DATABASE_URL is not set. Connect a Render PostgreSQL database to this service.\n";
-        return false;
-    }
-
-    database = PQconnectdb(url);
-
-    if (PQstatus(database) != CONNECTION_OK)
-    {
-        std::cerr << "PostgreSQL connection failed: "
-                  << PQerrorMessage(database) << "\n";
-        PQfinish(database);
-        database = nullptr;
-        return false;
-    }
-
-    if (!dbExec("CREATE TABLE IF NOT EXISTS users ("
-                "id INTEGER PRIMARY KEY,"
-                "name TEXT NOT NULL DEFAULT '',"
-                "email TEXT NOT NULL UNIQUE,"
-                "password TEXT NOT NULL DEFAULT '',"
-                "age INTEGER NOT NULL DEFAULT 0,"
-                "role TEXT NOT NULL,"
-                "removed BOOLEAN NOT NULL DEFAULT FALSE"
-                ");")) return false;
-
-    if (!dbExec("CREATE TABLE IF NOT EXISTS jobs ("
-                "id INTEGER PRIMARY KEY,"
-                "business_id INTEGER NOT NULL DEFAULT 0,"
-                "title TEXT NOT NULL DEFAULT '',"
-                "company TEXT NOT NULL DEFAULT '',"
-                "location TEXT NOT NULL DEFAULT '',"
-                "description TEXT NOT NULL DEFAULT '',"
-                "min_age INTEGER NOT NULL DEFAULT 13,"
-                "max_age INTEGER NOT NULL DEFAULT 18,"
-                "job_type TEXT NOT NULL DEFAULT '',"
-                "schedule TEXT NOT NULL DEFAULT '',"
-                "pay TEXT NOT NULL DEFAULT '',"
-                "applications_open BOOLEAN NOT NULL DEFAULT TRUE,"
-                "removed BOOLEAN NOT NULL DEFAULT FALSE,"
-                "publish_at BIGINT NOT NULL DEFAULT 0,"
-                "expire_at BIGINT NOT NULL DEFAULT 0"
-                ");")) return false;
-
-    if (!dbExec("CREATE TABLE IF NOT EXISTS job_questions ("
-                "id INTEGER PRIMARY KEY,"
-                "job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,"
-                "question_text TEXT NOT NULL DEFAULT ''"
-                ");")) return false;
-
-    if (!dbExec("CREATE TABLE IF NOT EXISTS applications ("
-                "id INTEGER PRIMARY KEY,"
-                "job_id INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,"
-                "teen_id INTEGER NOT NULL,"
-                "answers TEXT NOT NULL DEFAULT '',"
-                "status TEXT NOT NULL DEFAULT 'Submitted',"
-                "removed BOOLEAN NOT NULL DEFAULT FALSE"
-                ");")) return false;
-
-    return true;
-}
+//
+// This is intentionally simple for the no-database version.
+//
+// NOTE:
+// This is a prototype storage system, NOT production-grade
+// storage. Passwords are also stored in plaintext here.
+//
+// Before making this publicly accessible, use proper password
+// hashing and a real database.
+//
 
 void saveUsers()
 {
-    if (!database) return;
+    std::ofstream file("users.txt");
 
     for (const User& user : users)
     {
-        dbExecParams(
-            "INSERT INTO users "
-            "(id,name,email,password,age,role,removed) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7) "
-            "ON CONFLICT (id) DO UPDATE SET "
-            "name=EXCLUDED.name,email=EXCLUDED.email,password=EXCLUDED.password,"
-            "age=EXCLUDED.age,role=EXCLUDED.role,removed=EXCLUDED.removed;",
-            {
-                std::to_string(user.id),
-                user.name,
-                toLower(user.email),
-                user.password,
-                std::to_string(user.age),
-                roleToString(user.role),
-                user.removed ? "true" : "false"
-            }
-        );
+        file
+            << user.id << "|"
+            << user.name << "|"
+            << user.email << "|"
+            << user.password << "|"
+            << user.age << "|"
+            << roleToString(user.role) << "|"
+            << (user.removed ? 1 : 0)
+            << "\n";
     }
 }
+
 
 void loadUsers()
 {
-    if (!database) return;
+    std::ifstream file("users.txt");
 
-    PGresult* result = PQexec(
-        database,
-        "SELECT id,name,email,password,age,role,removed FROM users ORDER BY id;"
-    );
-
-    if (PQresultStatus(result) != PGRES_TUPLES_OK)
+    if (!file)
     {
-        std::cerr << "PostgreSQL error loading users: " << PQerrorMessage(database);
-        PQclear(result);
         return;
     }
 
-    users.clear();
-    int rows = PQntuples(result);
+    std::string line;
 
-    for (int i = 0; i < rows; ++i)
+    while (std::getline(file, line))
     {
+        std::vector<std::string> p =
+            split(line, '|');
+
+        if (p.size() != 7)
+        {
+            continue;
+        }
+
         try
         {
             User user;
-            user.id = std::stoi(dbValue(result, i, 0));
-            user.name = dbValue(result, i, 1);
-            user.email = dbValue(result, i, 2);
-            user.password = dbValue(result, i, 3);
-            user.age = std::stoi(dbValue(result, i, 4));
 
-            std::string role = dbValue(result, i, 5);
-            if (role == "BUSINESS") user.role = UserRole::BUSINESS;
-            else if (role == "ADMIN") user.role = UserRole::ADMIN;
-            else user.role = UserRole::TEEN;
+            user.id =
+                std::stoi(p[0]);
 
-            user.removed = dbValue(result, i, 6) == "t" ||
-                           dbValue(result, i, 6) == "true";
+            user.name =
+                p[1];
+
+            user.email =
+                p[2];
+
+            user.password =
+                p[3];
+
+            user.age =
+                std::stoi(p[4]);
+
+            if (p[5] == "BUSINESS")
+                user.role = UserRole::BUSINESS;
+            else if (p[5] == "ADMIN")
+                user.role = UserRole::ADMIN;
+            else
+                user.role = UserRole::TEEN;
+
+            user.removed =
+                p[6] == "1";
+
             users.push_back(user);
         }
-        catch (...) {}
+        catch (...)
+        {
+        }
     }
-
-    PQclear(result);
 }
+
 
 void saveJobs()
 {
-    if (!database) return;
+    std::ofstream file("jobs.txt");
 
     for (const Job& job : jobs)
     {
-        if (!dbExecParams(
-            "INSERT INTO jobs "
-            "(id,business_id,title,company,location,description,min_age,max_age,job_type,schedule,pay,applications_open,removed,publish_at,expire_at) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) "
-            "ON CONFLICT (id) DO UPDATE SET "
-            "business_id=EXCLUDED.business_id,title=EXCLUDED.title,company=EXCLUDED.company,"
-            "location=EXCLUDED.location,description=EXCLUDED.description,min_age=EXCLUDED.min_age,"
-            "max_age=EXCLUDED.max_age,job_type=EXCLUDED.job_type,schedule=EXCLUDED.schedule,"
-            "pay=EXCLUDED.pay,applications_open=EXCLUDED.applications_open,removed=EXCLUDED.removed,"
-            "publish_at=EXCLUDED.publish_at,expire_at=EXCLUDED.expire_at;",
-            {
-                std::to_string(job.id), std::to_string(job.businessId), job.title,
-                job.company, job.location, job.description, std::to_string(job.minAge),
-                std::to_string(job.maxAge), job.jobType, job.schedule, job.pay,
-                job.applicationsOpen ? "true" : "false", job.removed ? "true" : "false",
-                std::to_string(job.publishAt), std::to_string(job.expireAt)
-            })) continue;
+        file
+            << job.id << "|"
+            << job.businessId << "|"
+            << job.title << "|"
+            << job.company << "|"
+            << job.location << "|"
+            << job.description << "|"
+            << job.minAge << "|"
+            << job.maxAge << "|"
+            << job.jobType << "|"
+            << job.schedule << "|"
+            << job.pay << "|"
+            << (job.applicationsOpen ? 1 : 0) << "|"
+            << (job.removed ? 1 : 0) << "|"
+            << job.publishAt << "|"
+            << job.expireAt << "|";
 
-        dbExecParams("DELETE FROM job_questions WHERE job_id=$1;", {std::to_string(job.id)});
-
-        for (const Question& question : job.questions)
+        // Questions
+        for (size_t i = 0;
+             i < job.questions.size();
+             ++i)
         {
-            dbExecParams(
-                "INSERT INTO job_questions (id,job_id,question_text) VALUES ($1,$2,$3) "
-                "ON CONFLICT (id) DO UPDATE SET job_id=EXCLUDED.job_id,question_text=EXCLUDED.question_text;",
-                {std::to_string(question.id), std::to_string(job.id), question.text}
-            );
+            if (i > 0)
+            {
+                file << "~";
+            }
+
+            file
+                << job.questions[i].id
+                << ":"
+                << job.questions[i].text;
         }
+
+        file << "\n";
     }
 }
+
 
 void loadJobs()
 {
-    if (!database) return;
+    std::ifstream file("jobs.txt");
 
-    PGresult* result = PQexec(
-        database,
-        "SELECT id,business_id,title,company,location,description,min_age,max_age,job_type,schedule,pay,applications_open,removed,publish_at,expire_at FROM jobs ORDER BY id;"
-    );
-
-    if (PQresultStatus(result) != PGRES_TUPLES_OK)
+    if (!file)
     {
-        std::cerr << "PostgreSQL error loading jobs: " << PQerrorMessage(database);
-        PQclear(result);
         return;
     }
 
-    jobs.clear();
-    int rows = PQntuples(result);
+    std::string line;
 
-    for (int i = 0; i < rows; ++i)
+    while (std::getline(file, line))
     {
+        std::vector<std::string> p =
+            split(line, '|');
+
+        if (p.size() < 15)
+        {
+            continue;
+        }
+
         try
         {
             Job job;
-            job.id = std::stoi(dbValue(result, i, 0));
-            job.businessId = std::stoi(dbValue(result, i, 1));
-            job.title = dbValue(result, i, 2);
-            job.company = dbValue(result, i, 3);
-            job.location = dbValue(result, i, 4);
-            job.description = dbValue(result, i, 5);
-            job.minAge = std::stoi(dbValue(result, i, 6));
-            job.maxAge = std::stoi(dbValue(result, i, 7));
-            job.jobType = dbValue(result, i, 8);
-            job.schedule = dbValue(result, i, 9);
-            job.pay = dbValue(result, i, 10);
-            job.applicationsOpen = dbValue(result, i, 11) == "t" || dbValue(result, i, 11) == "true";
-            job.removed = dbValue(result, i, 12) == "t" || dbValue(result, i, 12) == "true";
-            job.publishAt = std::stoll(dbValue(result, i, 13));
-            job.expireAt = std::stoll(dbValue(result, i, 14));
+
+            job.id =
+                std::stoi(p[0]);
+
+            job.businessId =
+                std::stoi(p[1]);
+
+            job.title = p[2];
+            job.company = p[3];
+            job.location = p[4];
+            job.description = p[5];
+
+            job.minAge =
+                std::stoi(p[6]);
+
+            job.maxAge =
+                std::stoi(p[7]);
+
+            job.jobType = p[8];
+            job.schedule = p[9];
+            job.pay = p[10];
+
+            job.applicationsOpen =
+                p[11] == "1";
+
+            job.removed =
+                p[12] == "1";
+
+            job.publishAt =
+                std::stoll(p[13]);
+
+            job.expireAt =
+                std::stoll(p[14]);
+
+            if (p.size() >= 16 &&
+                !p[15].empty())
+            {
+                std::vector<std::string> questionParts =
+                    split(p[15], '~');
+
+                for (
+                    const std::string& q :
+                    questionParts
+                )
+                {
+                    size_t colon =
+                        q.find(':');
+
+                    if (
+                        colon ==
+                        std::string::npos
+                    )
+                    {
+                        continue;
+                    }
+
+                    Question question;
+
+                    question.id =
+                        std::stoi(
+                            q.substr(
+                                0,
+                                colon
+                            )
+                        );
+
+                    question.text =
+                        q.substr(
+                            colon + 1
+                        );
+
+                    job.questions.push_back(
+                        question
+                    );
+                }
+            }
+
             jobs.push_back(job);
         }
-        catch (...) {}
-    }
-    PQclear(result);
-
-    for (Job& job : jobs)
-    {
-        std::string jobIdText = std::to_string(job.id);
-        const char* questionParams[] = { jobIdText.c_str() };
-        PGresult* questions = PQexecParams(
-            database,
-            "SELECT id,question_text FROM job_questions WHERE job_id=$1 ORDER BY id;",
-            1,
-            nullptr,
-            questionParams,
-            nullptr,
-            nullptr,
-            0
-        );
-
-        if (PQresultStatus(questions) == PGRES_TUPLES_OK)
+        catch (...)
         {
-            for (int i = 0; i < PQntuples(questions); ++i)
-            {
-                try
-                {
-                    Question q;
-                    q.id = std::stoi(dbValue(questions, i, 0));
-                    q.text = dbValue(questions, i, 1);
-                    job.questions.push_back(q);
-                }
-                catch (...) {}
-            }
         }
-        PQclear(questions);
     }
 }
+
 
 void saveApplications()
 {
-    if (!database) return;
+    std::ofstream file(
+        "applications.txt"
+    );
 
-    if (!dbExec("DELETE FROM applications;")) return;
-
-    for (const Application& application : applications)
+    for (
+        const Application& application :
+        applications
+    )
     {
-        dbExecParams(
-            "INSERT INTO applications (id,job_id,teen_id,answers,status,removed) "
-            "VALUES ($1,$2,$3,$4,$5,$6);",
-            {
-                std::to_string(application.id),
-                std::to_string(application.jobId),
-                std::to_string(application.teenId),
-                application.answers,
-                application.status,
-                application.removed ? "true" : "false"
-            }
-        );
+        file
+            << application.id << "|"
+            << application.jobId << "|"
+            << application.teenId << "|"
+            << application.answers << "|"
+            << application.status << "|"
+            << (application.removed ? 1 : 0)
+            << "\n";
     }
 }
+
 
 void loadApplications()
 {
-    if (!database) return;
-
-    PGresult* result = PQexec(
-        database,
-        "SELECT id,job_id,teen_id,answers,status,removed FROM applications ORDER BY id;"
+    std::ifstream file(
+        "applications.txt"
     );
 
-    if (PQresultStatus(result) != PGRES_TUPLES_OK)
+    if (!file)
     {
-        std::cerr << "PostgreSQL error loading applications: " << PQerrorMessage(database);
-        PQclear(result);
         return;
     }
 
-    applications.clear();
-    int rows = PQntuples(result);
+    std::string line;
 
-    for (int i = 0; i < rows; ++i)
+    while (std::getline(file, line))
     {
+        std::vector<std::string> p =
+            split(line, '|');
+
+        if (p.size() != 6)
+        {
+            continue;
+        }
+
         try
         {
             Application application;
-            application.id = std::stoi(dbValue(result, i, 0));
-            application.jobId = std::stoi(dbValue(result, i, 1));
-            application.teenId = std::stoi(dbValue(result, i, 2));
-            application.answers = dbValue(result, i, 3);
-            application.status = dbValue(result, i, 4);
-            application.removed = dbValue(result, i, 5) == "t" || dbValue(result, i, 5) == "true";
-            applications.push_back(application);
+
+            application.id =
+                std::stoi(p[0]);
+
+            application.jobId =
+                std::stoi(p[1]);
+
+            application.teenId =
+                std::stoi(p[2]);
+
+            application.answers =
+                p[3];
+
+            application.status =
+                p[4];
+
+            application.removed =
+                p[5] == "1";
+
+            applications.push_back(
+                application
+            );
         }
-        catch (...) {}
+        catch (...)
+        {
+        }
     }
-    PQclear(result);
 }
+
 
 // ============================================================
 // SESSIONS
@@ -3119,7 +3079,11 @@ std::string businessDashboard(
 <div class="card">
 
 <h1>
-Business Dashboard
+)HTML"
+        << (user && user->role == UserRole::ADMIN
+                ? "Admin Listing Dashboard"
+                : "Business Dashboard")
+        << R"HTML(
 </h1>
 
 <p>
@@ -3904,6 +3868,13 @@ Admin Panel
 <p>
 You are signed in with administrator access.
 </p>
+
+<a
+    class="button"
+    href="/post-job"
+>
+Create a Job Listing
+</a>
 
 <a
     class="button gray"
@@ -4896,12 +4867,7 @@ void handleRequest(
 
     if (
         request.method == "GET" &&
-        (
-            request.path ==
-                "/business-login" ||
-            request.path ==
-                "/admin-login"
-        )
+        request.path == "/business-login"
     )
     {
         sendHTML(
@@ -5389,7 +5355,9 @@ void handleRequest(
 
         redirect(
             client,
-            "/business-dashboard"
+            user->role == UserRole::ADMIN
+                ? "/admin"
+                : "/business-dashboard"
         );
 
         return;
@@ -6500,11 +6468,6 @@ int main()
     if (configuredAdmins.empty())
     {
         std::cerr << "ERROR: No admin credentials found. Add TEENJOBS_ADMIN_1_EMAIL, TEENJOBS_ADMIN_1_PASSWORD, and TEENJOBS_ADMIN_1_NAME to .env (up to 50 admins).\n";
-        return 1;
-    }
-
-    if (!initDatabase())
-    {
         return 1;
     }
 

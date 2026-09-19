@@ -1,12 +1,12 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
-#include <sys/types.h>
 #include <unistd.h>
 
 #include <algorithm>
 #include <cctype>
 #include <ctime>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <map>
@@ -14,13 +14,6 @@
 #include <sstream>
 #include <string>
 #include <vector>
-#include <cstdlib>
-#include <cstring>
-
-using SOCKET = int;
-constexpr int INVALID_SOCKET = -1;
-constexpr int SOCKET_ERROR = -1;
-#define closesocket close
 
 
 // ============================================================
@@ -38,22 +31,107 @@ constexpr int SOCKET_ERROR = -1;
 // ============================================================
 // ADMIN CONFIGURATION
 // ============================================================
+// Admin credentials are loaded from .env / environment variables.
+// Supported formats:
+//   TEENJOBS_ADMINS=email:password,email2:password2
+// or one admin with:
+//   TEENJOBS_ADMIN_EMAIL=email
+//   TEENJOBS_ADMIN_PASSWORD=password
+// Never commit your real .env file to GitHub.
+
+std::string toLower(std::string value);
 
 struct AdminCredential
 {
     std::string email;
     std::string password;
-    std::string name;
 };
 
 std::vector<AdminCredential> configuredAdmins;
 
-std::string envValue(const std::string& key);
-void loadEnvFile(const std::string& filename);
-void loadAdminConfiguration();
-const AdminCredential* findConfiguredAdmin(const std::string& email, const std::string& password);
-bool isConfiguredAdmin(const std::string& email, const std::string& password);
+std::string trim(const std::string& value)
+{
+    size_t first = value.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) return "";
+    size_t last = value.find_last_not_of(" \t\r\n");
+    return value.substr(first, last - first + 1);
+}
 
+void loadDotEnv()
+{
+    std::ifstream file(".env");
+    if (!file) return;
+
+    std::string line;
+    while (std::getline(file, line))
+    {
+        line = trim(line);
+        if (line.empty() || line[0] == '#') continue;
+
+        size_t equals = line.find('=');
+        if (equals == std::string::npos) continue;
+
+        std::string key = trim(line.substr(0, equals));
+        std::string value = trim(line.substr(equals + 1));
+        if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
+            value = value.substr(1, value.size() - 2);
+        else if (value.size() >= 2 && value.front() == '\'' && value.back() == '\'')
+            value = value.substr(1, value.size() - 2);
+
+        // Do not overwrite variables already supplied by the host.
+        if (std::getenv(key.c_str()) == nullptr)
+        {
+            setenv(key.c_str(), value.c_str(), 0);
+        }
+    }
+}
+
+void loadAdminCredentials()
+{
+    configuredAdmins.clear();
+
+    const char* many = std::getenv("TEENJOBS_ADMINS");
+    if (many && *many)
+    {
+        std::stringstream ss(many);
+        std::string entry;
+        while (std::getline(ss, entry, ','))
+        {
+            size_t colon = entry.find(':');
+            if (colon == std::string::npos) continue;
+            std::string email = trim(entry.substr(0, colon));
+            std::string password = entry.substr(colon + 1);
+            if (!email.empty() && !password.empty())
+                configuredAdmins.push_back({toLower(email), password});
+        }
+    }
+
+    if (configuredAdmins.empty())
+    {
+        const char* email = std::getenv("TEENJOBS_ADMIN_EMAIL");
+        const char* password = std::getenv("TEENJOBS_ADMIN_PASSWORD");
+        if (email && password && *email && *password)
+            configuredAdmins.push_back({toLower(email), password});
+    }
+}
+
+bool isConfiguredAdminEmail(const std::string& email)
+{
+    std::string normalized = toLower(email);
+    for (const auto& admin : configuredAdmins)
+        if (admin.email == normalized) return true;
+    return false;
+}
+
+bool isConfiguredAdmin(const std::string& email, const std::string& password)
+{
+    std::string normalized = toLower(email);
+    for (const auto& admin : configuredAdmins)
+    {
+        if (admin.email == normalized && admin.password == password) return true;
+    }
+    return false;
+}
 
 // ============================================================
 // DATA STRUCTURES
@@ -517,15 +595,11 @@ void loadUsers()
                 std::stoi(p[4]);
 
             if (p[5] == "BUSINESS")
-            {
-                user.role =
-                    UserRole::BUSINESS;
-            }
+                user.role = UserRole::BUSINESS;
+            else if (p[5] == "ADMIN")
+                user.role = UserRole::ADMIN;
             else
-            {
-                user.role =
-                    UserRole::TEEN;
-            }
+                user.role = UserRole::TEEN;
 
             user.removed =
                 p[6] == "1";
@@ -1137,7 +1211,7 @@ HttpRequest parseRequest(
 // ============================================================
 
 void sendRaw(
-    SOCKET client,
+    int client,
     const std::string& response
 )
 {
@@ -1153,7 +1227,7 @@ void sendRaw(
 
 
 void sendHTML(
-    SOCKET client,
+    int client,
     const std::string& body,
     const std::string& extraHeaders = ""
 )
@@ -1179,7 +1253,7 @@ void sendHTML(
 
 
 void redirect(
-    SOCKET client,
+    int client,
     const std::string& location,
     const std::string& cookie = ""
 )
@@ -1213,7 +1287,7 @@ void redirect(
 }
 
 
-void send404(SOCKET client)
+void send404(int client)
 {
     sendHTML(
         client,
@@ -1223,7 +1297,7 @@ void send404(SOCKET client)
 
 
 void send400(
-    SOCKET client,
+    int client,
     const std::string& message
 )
 {
@@ -1540,109 +1614,6 @@ footer {
     font-size: 13px;
 }
 
-.nav-dropdown {
-    position: relative;
-    display: inline-block;
-    margin-left: 15px;
-}
-
-.nav-dropdown summary {
-    list-style: none;
-    cursor: pointer;
-    color: #33394a;
-    font-weight: 700;
-}
-
-.nav-dropdown summary::-webkit-details-marker {
-    display: none;
-}
-
-.nav-dropdown summary::after {
-    content: " ▾";
-    font-size: 11px;
-}
-
-.nav-menu {
-    position: absolute;
-    right: 0;
-    top: calc(100% + 8px);
-    min-width: 190px;
-    background: white;
-    border: 1px solid #e1e5ee;
-    border-radius: 12px;
-    box-shadow: 0 12px 30px rgba(24, 32, 51, 0.14);
-    padding: 7px;
-    z-index: 1000;
-}
-
-.nav-menu a {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin: 0;
-    padding: 10px 11px;
-    border-radius: 8px;
-    white-space: nowrap;
-}
-
-.nav-menu a:hover {
-    background: #f5f7fb;
-}
-
-.application-badge {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    min-width: 22px;
-    height: 22px;
-    padding: 0 5px;
-    border-radius: 50%;
-    background: #697386;
-    color: white;
-    font-size: 11px;
-    font-weight: 900;
-    margin-left: 10px;
-}
-
-.application-badge.wide {
-    border-radius: 11px;
-}
-
-.modal-backdrop {
-    position: fixed;
-    inset: 0;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: rgba(24, 32, 51, 0.48);
-    z-index: 2000;
-    padding: 20px;
-}
-
-.modal-embed {
-    width: min(430px, 100%);
-    background: white;
-    border: 1px solid #e1e5ee;
-    border-radius: 17px;
-    box-shadow: 0 20px 60px rgba(24, 32, 51, 0.25);
-    padding: 25px;
-}
-
-.modal-embed h2 {
-    margin-top: 0;
-}
-
-.modal-actions {
-    display: flex;
-    gap: 10px;
-    justify-content: flex-end;
-    margin-top: 20px;
-}
-
-.modal-actions form {
-    margin: 0;
-}
-
 .question {
     background: #f5f7fb;
     padding: 15px;
@@ -1686,26 +1657,17 @@ TeenJobs
 Home
 </a>
 
-<details class="nav-dropdown">
-<summary>Teen</summary>
-<div class="nav-menu">
-<a href="/teen-login">Log In</a>
-<a href="/teen-signup">Sign Up</a>
-<a href="/teen-dashboard">Current Applications</a>
-</div>
-</details>
-
-<details class="nav-dropdown">
-<summary>Business</summary>
-<div class="nav-menu">
-<a href="/business-login">Log In</a>
-<a href="/business-signup">Sign Up</a>
-<a href="/business-applications">
-Open Applications
-<span id="business-application-badge" class="application-badge">0</span>
+<a href="/teen-login">
+Teen
 </a>
-</div>
-</details>
+
+<a href="/business-login">
+Business
+</a>
+
+<a href="/admin-login">
+Admin
+</a>
 
 </div>
 
@@ -1722,31 +1684,6 @@ Open Applications
 <footer>
 TeenJobs — Opportunities built for young workers.
 </footer>
-
-<script>
-fetch('/business-application-count')
-    .then(function(response) {
-        if (!response.ok) return null;
-        return response.text();
-    })
-    .then(function(value) {
-        if (value === null) return;
-        var badge = document.getElementById('business-application-badge');
-        if (!badge) return;
-        var count = parseInt(value, 10);
-        if (isNaN(count) || count <= 0) {
-            badge.textContent = '0';
-            return;
-        }
-        if (count >= 9) {
-            badge.textContent = '9+';
-            badge.classList.add('wide');
-        } else {
-            badge.textContent = String(count);
-        }
-    })
-    .catch(function() {});
-</script>
 
 </body>
 </html>
@@ -1800,7 +1737,7 @@ User* currentUser(
 
 
 bool requireLogin(
-    SOCKET client,
+    int client,
     const HttpRequest& request
 )
 {
@@ -1819,7 +1756,7 @@ bool requireLogin(
 
 
 bool requireTeen(
-    SOCKET client,
+    int client,
     const HttpRequest& request
 )
 {
@@ -1844,7 +1781,7 @@ bool requireTeen(
 
 
 bool requireBusiness(
-    SOCKET client,
+    int client,
     const HttpRequest& request
 )
 {
@@ -1873,33 +1810,8 @@ bool requireBusiness(
 }
 
 
-bool requireBusinessAccount(
-    SOCKET client,
-    const HttpRequest& request
-)
-{
-    User* user =
-        currentUser(request);
-
-    if (
-        !user ||
-        user->role != UserRole::BUSINESS
-    )
-    {
-        redirect(
-            client,
-            "/business-login"
-        );
-
-        return false;
-    }
-
-    return true;
-}
-
-
 bool requireAdmin(
-    SOCKET client,
+    int client,
     const HttpRequest& request
 )
 {
@@ -2617,7 +2529,7 @@ Business Login
 </h1>
 
 <p class="small">
-Business accounts sign in here. Site administration also uses the Business login.
+Site administrators also sign in here.
 </p>
 
 )HTML";
@@ -3978,9 +3890,12 @@ Manage Jobs
             << job.id
             << "'>Manage</a> "
 
-            << "<button class='red' type='button' onclick=\"openRemoveJobModal("
+            << "<form style='display:inline' method='POST' action='/admin-remove-job'>"
+            << "<input type='hidden' name='jobId' value='"
             << job.id
-            << ")\">Remove</button>"
+            << "'>"
+            << "<button class='red' onclick=\"return confirm('Remove this job?')\">Remove</button>"
+            << "</form>"
 
             << "</td>"
             << "</tr>";
@@ -4151,71 +4066,6 @@ Applications
 
 )HTML";
 
-    html
-        << R"HTML(
-
-<div id="remove-job-modal" class="modal-backdrop" style="display:none">
-
-<div class="modal-embed">
-
-<h2>
-Are you sure?
-</h2>
-
-<p>
-This will remove the job listing from the site.
-</p>
-
-<div class="modal-actions">
-
-<button
-    class="green"
-    type="button"
-    onclick="closeRemoveJobModal()"
->
-No
-</button>
-
-<form
-    id="remove-job-form"
-    method="POST"
-    action="/admin-remove-job"
->
-<input
-    id="remove-job-id"
-    type="hidden"
-    name="jobId"
-    value=""
->
-
-<button
-    class="red"
-    type="submit"
->
-Yes
-</button>
-
-</form>
-
-</div>
-
-</div>
-
-</div>
-
-<script>
-function openRemoveJobModal(jobId) {
-    document.getElementById('remove-job-id').value = jobId;
-    document.getElementById('remove-job-modal').style.display = 'flex';
-}
-
-function closeRemoveJobModal() {
-    document.getElementById('remove-job-modal').style.display = 'none';
-}
-</script>
-
-)HTML";
-
     return page(
         "Admin Panel",
         html.str()
@@ -4326,70 +4176,10 @@ Toggle Applications
 
 <button
     class="red"
-    type="button"
-    onclick="openRemoveJobModal()"
+    onclick="return confirm('Remove this job?')"
 >
 Remove Job
 </button>
-
-<div id="remove-job-modal" class="modal-backdrop" style="display:none">
-
-<div class="modal-embed">
-
-<h2>
-Are you sure?
-</h2>
-
-<p>
-This will remove the job listing from the site.
-</p>
-
-<div class="modal-actions">
-
-<button
-    class="green"
-    type="button"
-    onclick="closeRemoveJobModal()"
->
-No
-</button>
-
-<form
-    method="POST"
-    action="/admin-remove-job"
->
-<input
-    type="hidden"
-    name="jobId"
-    value=")HTML"
-        << job->id
-        << R"HTML("
->
-
-<button
-    class="red"
-    type="submit"
->
-Yes
-</button>
-
-</form>
-
-</div>
-
-</div>
-
-</div>
-
-<script>
-function openRemoveJobModal() {
-    document.getElementById('remove-job-modal').style.display = 'flex';
-}
-
-function closeRemoveJobModal() {
-    document.getElementById('remove-job-modal').style.display = 'none';
-}
-</script>
 
 </form>
 
@@ -4627,7 +4417,7 @@ Try another age, location, or keyword.
 // ============================================================
 
 void handleRequest(
-    SOCKET client,
+    int client,
     const HttpRequest& request
 )
 {
@@ -4910,19 +4700,8 @@ void handleRequest(
             return;
         }
 
-        // Never allow signup to use a configured administrator email.
-        bool reservedAdminEmail = false;
-
-        for (const AdminCredential& admin : configuredAdmins)
-        {
-            if (toLower(admin.email) == toLower(email))
-            {
-                reservedAdminEmail = true;
-                break;
-            }
-        }
-
-        if (reservedAdminEmail)
+        // Never allow signup to create an admin.
+        if (isConfiguredAdminEmail(email))
         {
             sendHTML(
                 client,
@@ -5023,34 +4802,47 @@ void handleRequest(
         request.path == "/business-login"
     )
     {
-        std::string email =
-            toLower(
-                request.form.at("email")
+        auto emailIt =
+            request.form.find("email");
+
+        auto passwordIt =
+            request.form.find("password");
+
+        if (
+            emailIt == request.form.end() ||
+            passwordIt == request.form.end()
+        )
+        {
+            send400(
+                client,
+                "Login request was missing the email or password field."
             );
+
+            return;
+        }
+
+        std::string email =
+            toLower(emailIt->second);
 
         std::string password =
-            request.form.at("password");
+            passwordIt->second;
 
 
-        // Configured administrators also use Business -> Login.
-        // Any configured admin in .env can sign in here.
+        // First check owner/admin credentials.
 
-        const AdminCredential* configuredAdmin =
-            findConfiguredAdmin(
+        if (
+            isConfiguredAdmin(
                 email,
                 password
-            );
-
-        if (configuredAdmin)
+            )
+        )
         {
-            User* admin = nullptr;
+            User* admin =
+                nullptr;
 
             for (User& user : users)
             {
-                if (
-                    toLower(user.email) == toLower(configuredAdmin->email) &&
-                    user.role == UserRole::ADMIN
-                )
+                if (user.email == email && user.role == UserRole::ADMIN)
                 {
                     admin = &user;
                     break;
@@ -5061,25 +4853,28 @@ void handleRequest(
             {
                 User newAdmin;
 
-                newAdmin.id = nextUserId();
-                newAdmin.name = configuredAdmin->name;
-                newAdmin.email = configuredAdmin->email;
-                newAdmin.password = configuredAdmin->password;
-                newAdmin.age = 0;
-                newAdmin.role = UserRole::ADMIN;
+                newAdmin.id =
+                    nextUserId();
 
-                users.push_back(newAdmin);
+                newAdmin.name =
+                    "Site Administrator";
+
+                newAdmin.email = email;
+                newAdmin.password = password;
+
+                newAdmin.age = 0;
+
+                newAdmin.role =
+                    UserRole::ADMIN;
+
+                users.push_back(
+                    newAdmin
+                );
+
                 saveUsers();
-                admin = &users.back();
-            }
-            else
-            {
-                // Keep configured admin credentials authoritative.
-                admin->name = configuredAdmin->name;
-                admin->password = configuredAdmin->password;
-                admin->role = UserRole::ADMIN;
-                admin->removed = false;
-                saveUsers();
+
+                admin =
+                    &users.back();
             }
 
             std::string token =
@@ -5093,7 +4888,7 @@ void handleRequest(
                 "/admin",
                 "session=" +
                     token +
-                    "; Path=/; HttpOnly; SameSite=Lax"
+                    "; Path=/; HttpOnly"
             );
 
             return;
@@ -5257,7 +5052,7 @@ void handleRequest(
     )
     {
         if (
-            !requireBusinessAccount(
+            !requireBusiness(
                 client,
                 request
             )
@@ -5281,7 +5076,7 @@ void handleRequest(
     )
     {
         if (
-            !requireBusinessAccount(
+            !requireBusiness(
                 client,
                 request
             )
@@ -5508,225 +5303,6 @@ void handleRequest(
         redirect(
             client,
             "/business-dashboard"
-        );
-
-        return;
-    }
-
-
-    // --------------------------------------------------------
-    // BUSINESS APPLICATION COUNT
-    // --------------------------------------------------------
-
-    if (
-        request.method == "GET" &&
-        request.path == "/business-application-count"
-    )
-    {
-        User* user =
-            currentUser(request);
-
-        if (
-            !user ||
-            (
-                user->role != UserRole::BUSINESS &&
-                user->role != UserRole::ADMIN
-            )
-        )
-        {
-            sendHTML(client, "0");
-            return;
-        }
-
-        int count = 0;
-
-        for (const Application& application : applications)
-        {
-            if (application.removed)
-            {
-                continue;
-            }
-
-            Job* job =
-                findJob(application.jobId);
-
-            if (
-                !job ||
-                job->removed
-            )
-            {
-                continue;
-            }
-
-            if (
-                user->role == UserRole::ADMIN ||
-                job->businessId == user->id
-            )
-            {
-                count++;
-            }
-        }
-
-        sendHTML(
-            client,
-            std::to_string(count)
-        );
-
-        return;
-    }
-
-
-    // --------------------------------------------------------
-    // BUSINESS APPLICATIONS
-    // --------------------------------------------------------
-
-    if (
-        request.method == "GET" &&
-        request.path == "/business-applications"
-    )
-    {
-        if (
-            !requireBusiness(
-                client,
-                request
-            )
-        )
-        {
-            return;
-        }
-
-        User* user =
-            currentUser(request);
-
-        std::ostringstream html;
-
-        html
-            << R"HTML(
-
-<div class="container">
-
-<div class="card">
-
-<h1>
-Open Applications
-</h1>
-
-<p>
-Applications submitted to your active job listings.
-</p>
-
-</div>
-
-)HTML";
-
-        bool found = false;
-
-        for (
-            const Application& application :
-            applications
-        )
-        {
-            if (application.removed)
-            {
-                continue;
-            }
-
-            Job* job =
-                findJob(application.jobId);
-
-            if (
-                !job ||
-                job->removed
-            )
-            {
-                continue;
-            }
-
-            if (
-                user->role != UserRole::ADMIN &&
-                job->businessId != user->id
-            )
-            {
-                continue;
-            }
-
-            const User* teen =
-                findUserConst(application.teenId);
-
-            found = true;
-
-            html
-                << R"HTML(
-
-<div class="card">
-
-<h2>
-)HTML"
-                << htmlEscape(job->title)
-                << R"HTML(
-</h2>
-
-<p>
-Applicant:
-<strong>
-)HTML"
-                << (
-                    teen
-                    ? htmlEscape(teen->name)
-                    : "Unknown"
-                )
-                << R"HTML(
-</strong>
-</p>
-
-<p>
-Status:
-<strong>
-)HTML"
-                << htmlEscape(application.status)
-                << R"HTML(
-</strong>
-</p>
-
-<a
-    class="button"
-    href="/business-job?id=)HTML"
-                << job->id
-                << R"HTML("
->
-View Application
-</a>
-
-</div>
-
-)HTML";
-        }
-
-        if (!found)
-        {
-            html
-                << R"HTML(
-
-<div class="card">
-No open applications right now.
-</div>
-
-)HTML";
-        }
-
-        html
-            << R"HTML(
-
-</div>
-
-)HTML";
-
-        sendHTML(
-            client,
-            page(
-                "Open Applications",
-                html.str()
-            )
         );
 
         return;
@@ -6548,23 +6124,127 @@ No open applications right now.
 // ============================================================
 
 std::string receiveRequest(
-    SOCKET client
+    int client
 )
 {
     std::string request;
 
     char buffer[8192];
 
-    int received = 0;
-
     size_t headerEnd =
         std::string::npos;
 
     int contentLength = 0;
 
-    do
+    // Receive until the complete HTTP headers arrive.
+    while (headerEnd == std::string::npos)
     {
-        received =
+        int received =
+            recv(
+                client,
+                buffer,
+                sizeof(buffer),
+                0
+            );
+
+        if (received <= 0)
+        {
+            return request;
+        }
+
+        request.append(
+            buffer,
+            received
+        );
+
+        headerEnd =
+            request.find(
+                "\r\n\r\n"
+            );
+
+        if (request.size() > 1024 * 1024)
+        {
+            return "";
+        }
+    }
+
+    // Read Content-Length from the headers.
+    std::string headers =
+        request.substr(
+            0,
+            headerEnd
+        );
+
+    std::string lower =
+        toLower(headers);
+
+    size_t pos =
+        lower.find(
+            "content-length:"
+        );
+
+    if (pos != std::string::npos)
+    {
+        pos +=
+            std::string(
+                "content-length:"
+            ).size();
+
+        while (
+            pos < lower.size() &&
+            std::isspace(
+                static_cast<unsigned char>(
+                    lower[pos]
+                )
+            )
+        )
+        {
+            pos++;
+        }
+
+        std::string number;
+
+        while (
+            pos < lower.size() &&
+            std::isdigit(
+                static_cast<unsigned char>(
+                    lower[pos]
+                )
+            )
+        )
+        {
+            number += lower[pos];
+            pos++;
+        }
+
+        if (!number.empty())
+        {
+            try
+            {
+                contentLength =
+                    std::stoi(number);
+            }
+            catch (...)
+            {
+                contentLength = 0;
+            }
+        }
+    }
+
+    // The first recv() may contain only part of the POST body.
+    // Continue until all Content-Length bytes have arrived.
+    size_t bodyStart =
+        headerEnd + 4;
+
+    size_t wantedSize =
+        bodyStart +
+        static_cast<size_t>(
+            std::max(contentLength, 0)
+        );
+
+    while (request.size() < wantedSize)
+    {
+        int received =
             recv(
                 client,
                 buffer,
@@ -6582,110 +6262,21 @@ std::string receiveRequest(
             received
         );
 
-        headerEnd =
-            request.find(
-                "\r\n\r\n"
-            );
-
-        if (
-            headerEnd !=
-            std::string::npos
-        )
+        if (request.size() > 10 * 1024 * 1024)
         {
-            std::string headers =
-                request.substr(
-                    0,
-                    headerEnd
-                );
-
-            std::string lower =
-                toLower(headers);
-
-            size_t pos =
-                lower.find(
-                    "content-length:"
-                );
-
-            if (
-                pos !=
-                std::string::npos
-            )
-            {
-                pos +=
-                    std::string(
-                        "content-length:"
-                    ).size();
-
-                while (
-                    pos <
-                        lower.size() &&
-                    std::isspace(
-                        static_cast<unsigned char>(
-                            lower[pos]
-                        )
-                    )
-                )
-                {
-                    pos++;
-                }
-
-                std::string number;
-
-                while (
-                    pos <
-                        lower.size() &&
-                    std::isdigit(
-                        static_cast<unsigned char>(
-                            lower[pos]
-                        )
-                    )
-                )
-                {
-                    number +=
-                        lower[pos];
-
-                    pos++;
-                }
-
-                if (!number.empty())
-                {
-                    contentLength =
-                        std::stoi(
-                            number
-                        );
-                }
-            }
-
-            size_t bodyStart =
-                headerEnd + 4;
-
-            if (
-                request.size() >=
-                    bodyStart +
-                        static_cast<size_t>(
-                            contentLength
-                        )
-            )
-            {
-                break;
-            }
+            return "";
         }
-
-    } while (
-        received ==
-        sizeof(buffer)
-    );
+    }
 
     return request;
 }
-
 
 // ============================================================
 // CLIENT
 // ============================================================
 
 void handleClient(
-    SOCKET client
+    int client
 )
 {
     std::string raw =
@@ -6693,7 +6284,7 @@ void handleClient(
 
     if (raw.empty())
     {
-        closesocket(client);
+        close(client);
 
         return;
     }
@@ -6706,7 +6297,7 @@ void handleClient(
         request
     );
 
-    closesocket(client);
+    close(client);
 }
 
 
@@ -6791,6 +6382,22 @@ void createSampleJobs()
 }
 
 
+int getPort()
+{
+    const char* value = std::getenv("PORT");
+    if (!value || !*value) return 10000;
+    try
+    {
+        int port = std::stoi(value);
+        return (port > 0 && port <= 65535) ? port : 10000;
+    }
+    catch (...)
+    {
+        return 10000;
+    }
+}
+
+
 // ============================================================
 // MAIN
 // ============================================================
@@ -6800,6 +6407,14 @@ int main()
     std::cout
         << "Starting TeenJobs...\n";
 
+    loadDotEnv();
+    loadAdminCredentials();
+
+    if (configuredAdmins.empty())
+    {
+        std::cerr << "ERROR: No admin credentials found. Add TEENJOBS_ADMINS or TEENJOBS_ADMIN_EMAIL and TEENJOBS_ADMIN_PASSWORD to .env.\n";
+        return 1;
+    }
 
     loadUsers();
 
@@ -6808,138 +6423,114 @@ int main()
     loadApplications();
 
 
-    // Load secret configuration.
-    // Render secret files are available at /etc/secrets/.env.
-    loadEnvFile("/etc/secrets/.env");
-    loadEnvFile(".env");
-    loadAdminConfiguration();
-
-    if (configuredAdmins.empty())
+    // Create every configured admin account if it does not already exist.
+    for (const auto& credential : configuredAdmins)
     {
-        std::cerr
-            << "ERROR: Add at least one admin to .env using "
-            << "TEENJOBS_ADMIN_1_EMAIL and TEENJOBS_ADMIN_1_PASSWORD.\n";
-
-        return 1;
-    }
-
-    // Create/synchronize every configured admin account.
-    for (const AdminCredential& configuredAdmin : configuredAdmins)
-    {
-        User* admin = nullptr;
-
-        for (User& user : users)
+        bool adminExists = false;
+        for (const User& user : users)
         {
-            if (toLower(user.email) == toLower(configuredAdmin.email))
+            if (user.role == UserRole::ADMIN && user.email == credential.email)
             {
-                admin = &user;
+                adminExists = true;
                 break;
             }
         }
 
-        if (!admin)
+        if (!adminExists)
         {
-            User newAdmin;
-            newAdmin.id = nextUserId();
-            newAdmin.name = configuredAdmin.name;
-            newAdmin.email = configuredAdmin.email;
-            newAdmin.password = configuredAdmin.password;
-            newAdmin.age = 0;
-            newAdmin.role = UserRole::ADMIN;
-            newAdmin.removed = false;
-
-            users.push_back(newAdmin);
-        }
-        else
-        {
-            admin->name = configuredAdmin.name;
-            admin->password = configuredAdmin.password;
-            admin->role = UserRole::ADMIN;
-            admin->removed = false;
+            User admin;
+            admin.id = nextUserId();
+            admin.name = "Site Administrator";
+            admin.email = credential.email;
+            admin.password = credential.password;
+            admin.role = UserRole::ADMIN;
+            users.push_back(admin);
         }
     }
-
     saveUsers();
 
     createSampleJobs();
 
 
-    // --------------------------------------------------------
-    // POSIX SOCKET SERVER / RENDER
-    // --------------------------------------------------------
-
-    int port = 18080;
-
-    std::string portValue = envValue("PORT");
-
-    if (!portValue.empty())
-    {
-        try
-        {
-            port = std::stoi(portValue);
-        }
-        catch (...)
-        {
-            std::cerr << "Invalid PORT value.\n";
-            return 1;
-        }
-    }
-
-    SOCKET serverSocket =
+    int serverSocket =
         socket(
             AF_INET,
             SOCK_STREAM,
             0
         );
 
-    if (serverSocket == INVALID_SOCKET)
+    if (
+        serverSocket ==
+        -1
+    )
     {
         std::cerr
             << "Could not create server socket.\n";
+
         return 1;
     }
 
-    int reuse = 1;
-
-    setsockopt(
-        serverSocket,
-        SOL_SOCKET,
-        SO_REUSEADDR,
-        &reuse,
-        sizeof(reuse)
-    );
 
     sockaddr_in serverAddress{};
 
-    serverAddress.sin_family = AF_INET;
-    serverAddress.sin_addr.s_addr = htonl(INADDR_ANY);
+    serverAddress.sin_family =
+        AF_INET;
+
+    serverAddress.sin_addr.s_addr =
+        htonl(
+            INADDR_ANY
+        );
+
+    int port = getPort();
     serverAddress.sin_port = htons(static_cast<uint16_t>(port));
+
+    int reuse = 1;
+    setsockopt(serverSocket, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
 
     if (
         bind(
             serverSocket,
-            reinterpret_cast<sockaddr*>(&serverAddress),
-            sizeof(serverAddress)
-        ) == SOCKET_ERROR
+            reinterpret_cast<
+                sockaddr*
+            >(
+                &serverAddress
+            ),
+            sizeof(
+                serverAddress
+            )
+        ) ==
+        -1
     )
     {
         std::cerr
-            << "Could not bind port "
-            << port
-            << ".\n";
+            << "Could not bind port " << port << ".\n";
 
-        closesocket(serverSocket);
+        close(
+            serverSocket
+        );
+
         return 1;
     }
 
-    if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR)
+
+    if (
+        listen(
+            serverSocket,
+            SOMAXCONN
+        ) ==
+        -1
+    )
     {
         std::cerr
             << "Could not listen.\n";
 
-        closesocket(serverSocket);
+        close(
+            serverSocket
+        );
+
         return 1;
     }
+
 
     std::cout
         << "\n=====================================\n"
@@ -6947,188 +6538,44 @@ int main()
         << " Listening on 0.0.0.0:" << port << "\n"
         << "=====================================\n\n";
 
+
     while (true)
     {
         sockaddr_in clientAddress{};
-        socklen_t clientSize = sizeof(clientAddress);
 
-        SOCKET client =
+        socklen_t clientSize =
+            sizeof(
+                clientAddress
+            );
+
+        int client =
             accept(
                 serverSocket,
-                reinterpret_cast<sockaddr*>(&clientAddress),
+                reinterpret_cast<
+                    sockaddr*
+                >(
+                    &clientAddress
+                ),
                 &clientSize
             );
 
-        if (client == INVALID_SOCKET)
-        {
-            continue;
-        }
-
-        handleClient(client);
-    }
-
-    closesocket(serverSocket);
-
-    return 0;
-}// ============================================================
-// ENVIRONMENT / ADMIN CONFIGURATION
-// ============================================================
-
-std::string envValue(const std::string& key)
-{
-    const char* value = std::getenv(key.c_str());
-
-    if (!value)
-    {
-        return "";
-    }
-
-    return value;
-}
-
-
-void loadEnvFile(const std::string& filename)
-{
-    std::ifstream file(filename);
-
-    if (!file)
-    {
-        return;
-    }
-
-    std::string line;
-
-    while (std::getline(file, line))
-    {
-        if (!line.empty() && line.back() == '\r')
-        {
-            line.pop_back();
-        }
-
-        if (line.empty() || line[0] == '#')
-        {
-            continue;
-        }
-
-        size_t equals = line.find('=');
-
-        if (equals == std::string::npos)
-        {
-            continue;
-        }
-
-        std::string key = line.substr(0, equals);
-        std::string value = line.substr(equals + 1);
-
-        size_t first = 0;
-        while (first < key.size() && std::isspace(static_cast<unsigned char>(key[first])))
-        {
-            ++first;
-        }
-        key = key.substr(first);
-
-        while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back())))
-        {
-            key.pop_back();
-        }
-
-        if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
-        {
-            value = value.substr(1, value.size() - 2);
-        }
-
-        // Render-provided environment variables win over the local .env file.
-        if (std::getenv(key.c_str()) == nullptr)
-        {
-            setenv(key.c_str(), value.c_str(), 0);
-        }
-    }
-}
-
-
-void loadAdminConfiguration()
-{
-    configuredAdmins.clear();
-
-    std::string legacyEmail = envValue("TEENJOBS_ADMIN_EMAIL");
-    std::string legacyPassword = envValue("TEENJOBS_ADMIN_PASSWORD");
-
-    if (!legacyEmail.empty() && !legacyPassword.empty())
-    {
-        configuredAdmins.push_back({
-            legacyEmail,
-            legacyPassword,
-            "Site Administrator"
-        });
-    }
-
-    for (int i = 1; i <= 50; ++i)
-    {
-        std::string prefix =
-            "TEENJOBS_ADMIN_" + std::to_string(i) + "_";
-
-        std::string email = envValue(prefix + "EMAIL");
-        std::string password = envValue(prefix + "PASSWORD");
-        std::string name = envValue(prefix + "NAME");
-
-        if (email.empty() || password.empty())
-        {
-            continue;
-        }
-
-        if (name.empty())
-        {
-            name = "Site Administrator";
-        }
-
-        bool duplicate = false;
-
-        for (const AdminCredential& admin : configuredAdmins)
-        {
-            if (toLower(admin.email) == toLower(email))
-            {
-                duplicate = true;
-                break;
-            }
-        }
-
-        if (!duplicate)
-        {
-            configuredAdmins.push_back({email, password, name});
-        }
-    }
-}
-
-
-const AdminCredential* findConfiguredAdmin(
-    const std::string& email,
-    const std::string& password
-)
-{
-    std::string normalizedEmail = toLower(email);
-
-    for (const AdminCredential& admin : configuredAdmins)
-    {
         if (
-            toLower(admin.email) == normalizedEmail &&
-            admin.password == password
+            client ==
+            -1
         )
         {
-            return &admin;
+            continue;
         }
+
+        handleClient(
+            client
+        );
     }
 
-    return nullptr;
+
+    close(
+        serverSocket
+    );
+
+    return 0;
 }
-
-
-bool isConfiguredAdmin(
-    const std::string& email,
-    const std::string& password
-)
-{
-    return findConfiguredAdmin(email, password) != nullptr;
-}
-
-
-

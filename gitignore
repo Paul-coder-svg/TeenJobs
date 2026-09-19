@@ -1,0 +1,7 @@
+.env
+*.env
+TeenJobs
+TeenJobs.exe
+users.txt
+jobs.txt
+applications.txt
